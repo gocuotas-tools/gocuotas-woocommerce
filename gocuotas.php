@@ -2,7 +2,7 @@
 
 /**
  * Plugin Name: GoCuotas
- * Version: 1.6.0.3
+ * Version: 1.6.0.4
  * Author: GoCuotas
  * Author URI: https://gocuotas.com
  * Plugin URI: https://docs.google.com/document/d/1B9jeOPo05W_yysJDf2cJH5Idmtv_jmddu40aONwYdTg/edit?tab=t.0
@@ -19,14 +19,14 @@ require_once __DIR__ . '/updater/plugin-update-checker.php';
 use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
 
 $myUpdateChecker = PucFactory::buildUpdateChecker(
-    'https://github.com/matesasesinos/gocuotas',
+    'https://github.com/gocuotas-tools/gocuotas-woocommerce',
     __FILE__,
     'gocuotas'
 );
 
 $myUpdateChecker->setBranch('stable');
 
-define('GC_VERSION', '1.6.0.2');
+define('GC_VERSION', '1.6.0.4');
 
 require_once plugin_dir_path(__FILE__) . 'includes/helpers/class-helper.php';
 

@@ -248,13 +248,7 @@ class WC_Gateway_GoCuotas extends WC_Payment_Gateway
                 ];
             }
 
-            $total = $order->get_total();
-            $total = str_replace(".", "", $total);
-            $total = str_replace(",", "", $total);
-
-            if (intval(get_option('woocommerce_price_num_decimals')) == 0) {
-                $total = number_format($total, 2, '', '');
-            }
+            $total = (int) round((float) $order->get_total() * 100);
 
             //UTM
             $utmParams = $this->setUTMParams();

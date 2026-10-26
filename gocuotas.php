@@ -26,7 +26,7 @@ $myUpdateChecker = PucFactory::buildUpdateChecker(
 
 $myUpdateChecker->setBranch('stable');
 
-define('GC_VERSION', '1.6.1.0');
+define('GC_VERSION', '1.6.1.1');
 
 require_once plugin_dir_path(__FILE__) . 'includes/helpers/class-helper.php';
 

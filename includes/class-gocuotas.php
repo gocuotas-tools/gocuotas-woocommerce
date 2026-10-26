@@ -263,12 +263,25 @@ class WC_Gateway_GoCuotas extends WC_Payment_Gateway
                 $orderReceivedUrlSuccess = add_query_arg($utmParams, $orderReceivedUrlSuccess);
             }
 
+            // Token secreto por pedido: el webhook solo se acepta si vuelve con este token
+            $webhookToken = $order->get_meta('_gocuotas_webhook_token');
+            if (empty($webhookToken)) {
+                $webhookToken = bin2hex(random_bytes(32));
+                $order->update_meta_data('_gocuotas_webhook_token', $webhookToken);
+                $order->save();
+            }
+
+            $webhookUrl = add_query_arg([
+                'order_id' => $order_id,
+                'token' => $webhookToken,
+            ], home_url('/wc-api/gocuotas_webhook'));
+
             $body = [
                 'amount_in_cents' => $total,
                 'order_reference_id' => $order_id,
                 'url_success' => $orderReceivedUrlSuccess,
                 'url_failure' => $orderReceivedUrlFail,
-                'webhook_url' => home_url() . '/wc-api/gocuotas_webhook',
+                'webhook_url' => $webhookUrl,
                 'email' => $order->get_billing_email(),
                 'phone_number' => $order->get_billing_phone(),
             ];
@@ -284,13 +297,17 @@ class WC_Gateway_GoCuotas extends WC_Payment_Gateway
             };
 
             if ($godata['logg'] == 'yes') {
+                // No dejar el token del webhook en el log
+                $logBody = $body;
+                $logBody['webhook_url'] = add_query_arg('token', '***', $webhookUrl);
+
                 wc_get_logger()->info('GoCuotas: Respuesta API - ' . print_r([
                     'success_url' => $orderReceivedUrlSuccess,
                     'failure_url' => $orderReceivedUrlFail,
                     'utm_params' => $utmParams,
-                    'body' => $body
+                    'body' => $logBody
                 ], true), array('source' => 'gocuotas'));
-                wc_get_logger()->info('GoCuotas: Respuesta API - ' . print_r($paymentInit, true), array('source' => 'gocuotas'));
+                wc_get_logger()->info('GoCuotas: Respuesta API - ' . str_replace($webhookToken, '***', print_r($paymentInit, true)), array('source' => 'gocuotas'));
             }
 
             $urlInit = json_decode($paymentInit)->url_init;
@@ -349,35 +366,88 @@ class WC_Gateway_GoCuotas extends WC_Payment_Gateway
     public function webhook()
     {
         $data = json_decode(file_get_contents('php://input'), true);
+        $data = is_array($data) ? array_change_key_case($data, CASE_LOWER) : [];
+
+        $logg = get_option('woocommerce_gocuotas_settings', true)['logg'] == 'yes';
 
         // Logger
-        if (get_option('woocommerce_gocuotas_settings', true)['logg'] == 'yes') {
+        if ($logg) {
             wc_get_logger()->info('GoCuotas: Webhook recibido - ' . print_r($data, true), array('source' => 'gocuotas'));
         }
 
-        $order = wc_get_order($data['order_reference_id']);
+        $orderId = isset($_GET['order_id']) ? absint($_GET['order_id']) : 0;
+        $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
 
-        if (!$order) return;
+        $order = $orderId ? wc_get_order($orderId) : false;
 
-        if ($order->get_payment_method() != 'gocuotas')
-            return;
-
-        $status = ['completed', 'processing', 'cancelled', 'refunded'];
-
-        if (in_array($order->get_status(), $status)) return;
-
-        if ($data['status'] != 'approved') {
-            $message = "Go Cuotas: ERROR EN PAGO, DENEGADO. IPN<br /> Ver log de WooCommerce para más detalles.";
-            $order->update_status('failed');
-            $order->add_order_note($message);
-
-            return;
+        if (!$order || $order->get_payment_method() != 'gocuotas') {
+            $this->webhookReject('pedido inexistente o de otro medio de pago', $logg);
         }
 
-        $order->payment_complete();
-        wc_reduce_stock_levels($data['order_reference_id']);
+        $status = ['completed', 'processing', 'cancelled', 'refunded'];
+        $storedToken = $order->get_meta('_gocuotas_webhook_token');
 
-        update_option('webhook_debug', $_GET);
+        if (empty($storedToken)) {
+            // Pedido creado antes de la versión con token: no se puede validar el webhook
+            if (!in_array($order->get_status(), $status)) {
+                $order->add_order_note(__('GO Cuotas: se recibió un webhook sin token válido. Verificar el pago manualmente en el panel de GOcuotas.', 'gocuotas'));
+            }
+            $this->webhookReject('pedido sin token guardado #' . $order->get_id(), $logg);
+        }
+
+        if ($token === '' || !hash_equals($storedToken, $token)) {
+            $this->webhookReject('token inválido para el pedido #' . $order->get_id(), $logg);
+        }
+
+        if (!isset($data['order_reference_id']) || (string) $data['order_reference_id'] !== (string) $order->get_id()) {
+            $this->webhookReject('order_reference_id no coincide con el pedido #' . $order->get_id(), $logg);
+        }
+
+        if (in_array($order->get_status(), $status)) {
+            $this->webhookResponse(200);
+        }
+
+        if (!isset($data['status']) || $data['status'] != 'approved') {
+            if (in_array($order->get_status(), ['pending', 'on-hold'])) {
+                $message = "Go Cuotas: ERROR EN PAGO, DENEGADO. IPN<br /> Ver log de WooCommerce para más detalles.";
+                $order->update_status('failed');
+                $order->add_order_note($message);
+            }
+
+            $this->webhookResponse(200);
+        }
+
+        $expected = (int) round((float) $order->get_total() * 100);
+        $received = isset($data['amount_in_cents']) ? (int) $data['amount_in_cents'] : 0;
+
+        if ($received !== $expected) {
+            $order->update_status('on-hold', sprintf(
+                __('GO Cuotas: el monto aprobado (%1$s centavos) no coincide con el total del pedido (%2$s centavos). Verificar el pago manualmente en el panel de GOcuotas.', 'gocuotas'),
+                $received,
+                $expected
+            ));
+
+            $this->webhookResponse(200);
+        }
+
+        $order->payment_complete(isset($data['order_id']) ? (string) $data['order_id'] : '');
+
+        $this->webhookResponse(200);
+    }
+
+    private function webhookReject($reason, $logg)
+    {
+        if ($logg) {
+            wc_get_logger()->warning('GoCuotas: Webhook rechazado - ' . $reason, array('source' => 'gocuotas'));
+        }
+
+        $this->webhookResponse(403);
+    }
+
+    private function webhookResponse($code)
+    {
+        status_header($code);
+        exit;
     }
 
     private function endpointURL()
